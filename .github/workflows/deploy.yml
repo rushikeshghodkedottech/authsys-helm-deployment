@@ -235,16 +235,20 @@ jobs:
         run: |
           echo "🏗️ Creating namespace ${{ env.NAMESPACE }}..."
           kubectl create namespace ${{ env.NAMESPACE }} || echo "Namespace already exists"
-      
+
       - name: Deploy Database
+        env:
+          FORCE_FULL_DEPLOY: ${{ github.event.inputs.force_full_deploy }}
+          FORCE_DATABASE_DEPLOY: ${{ github.event.inputs.force_database_deploy }}
+          NAMESPACE: ${{ env.NAMESPACE }}
         run: |
           echo "📊 Managing database deployment..."
           
-          if helm list -n ${{ env.NAMESPACE }} | grep -q authsys-database; then
-            if [[ "${{ github.event.inputs.force_database_deploy }}" == "true" ]] || [[ "${{ github.event.inputs.force_full_deploy }}" == "true" ]]; then
+          if helm list -n $NAMESPACE | grep -q authsys-database; then
+            if [[ "$FORCE_DATABASE_DEPLOY" == "true" ]] || [[ "$FORCE_FULL_DEPLOY" == "true" ]]; then
               echo "🔄 Force redeploying database..."
               helm upgrade authsys-database authsys-repo/authsys-db-chart \
-                --namespace ${{ env.NAMESPACE }} \
+                --namespace $NAMESPACE \
                 --values values.yaml \
                 --wait --timeout=10m
             else
@@ -253,17 +257,18 @@ jobs:
           else
             echo "📊 Deploying database for the first time..."
             helm install authsys-database authsys-repo/authsys-db-chart \
-              --namespace ${{ env.NAMESPACE }} \
+              --namespace $NAMESPACE \
               --values values.yaml \
               --wait --timeout=10m
           fi
           
           echo "⏳ Waiting for database to be ready..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-db-chart -n ${{ env.NAMESPACE }} --timeout=300s || {
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-db-chart -n $NAMESPACE --timeout=300s || {
             echo "⚠️ Database pods not ready, checking status..."
-            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-db-chart
-            kubectl describe pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-db-chart
+            kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-db-chart
+            kubectl describe pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-db-chart
           }
+
       
       - name: Deploy Backend
         if: steps.vars.outputs.deploy_backend == 'true'
@@ -289,61 +294,59 @@ jobs:
             kubectl describe pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-backend-chart
           }
       
+      - name: Deploy Backend
+        if: steps.vars.outputs.deploy_backend == 'true'
+        env:
+          FORCE_FULL_DEPLOY: ${{ github.event.inputs.force_full_deploy }}
+          NAMESPACE: ${{ env.NAMESPACE }}
+          BACKEND_TAG: ${{ steps.vars.outputs.backend_tag }}
+        run: |
+          echo "🔧 Deploying backend with tag: $BACKEND_TAG"
+          
+          FORCE_FLAG=""
+          if [[ "$FORCE_FULL_DEPLOY" == "true" ]]; then
+            FORCE_FLAG="--force"
+          fi
+          
+          helm upgrade --install authsys-backend authsys-repo/authsys-backend-chart \
+            --namespace $NAMESPACE \
+            --set image.tag=$BACKEND_TAG \
+            --values values.yaml \
+            --wait --timeout=5m $FORCE_FLAG
+          
+          echo "⏳ Waiting for backend to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-backend-chart -n $NAMESPACE --timeout=300s || {
+            echo "⚠️ Backend pods not ready, checking status..."
+            kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-backend-chart
+            kubectl describe pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-backend-chart
+          }
+      
       - name: Deploy Frontend
         if: steps.vars.outputs.deploy_frontend == 'true'
+        env:
+          FORCE_FULL_DEPLOY: ${{ github.event.inputs.force_full_deploy }}
+          NAMESPACE: ${{ env.NAMESPACE }}
+          FRONTEND_TAG: ${{ steps.vars.outputs.frontend_tag }}
         run: |
-          echo "🎨 Deploying frontend with tag: ${{ steps.vars.outputs.frontend_tag }}"
+          echo "🎨 Deploying frontend with tag: $FRONTEND_TAG"
           
-          if [[ "${{ github.event.inputs.force_full_deploy }}" == "true" ]]; then
+          FORCE_FLAG=""
+          if [[ "$FORCE_FULL_DEPLOY" == "true" ]]; then
             FORCE_FLAG="--force"
-          else
-            FORCE_FLAG=""
           fi
           
           helm upgrade --install authsys-frontend authsys-repo/authsys-frontend-chart \
-            --namespace ${{ env.NAMESPACE }} \
-            --set image.tag=${{ steps.vars.outputs.frontend_tag }} \
+            --namespace $NAMESPACE \
+            --set image.tag=$FRONTEND_TAG \
             --values values.yaml \
             --wait --timeout=5m $FORCE_FLAG
           
           echo "⏳ Waiting for frontend to be ready..."
-          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-frontend-chart -n ${{ env.NAMESPACE }} --timeout=300s || {
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-frontend-chart -n $NAMESPACE --timeout=300s || {
             echo "⚠️ Frontend pods not ready, checking status..."
-            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-frontend-chart
-            kubectl describe pods -n ${{ env.NAMESPACE } -l app.kubernetes.io/name=authsys-frontend-chart
+            kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-frontend-chart
+            kubectl describe pods -n $NAMESPACE -l app.kubernetes.io/name=authsys-frontend-chart
           }
-      
-      - name: Verify deployment
-        run: |
-          echo "🔍 Verifying deployment..."
-          echo ""
-          
-          echo "📊 All Pods in namespace ${{ env.NAMESPACE }}:"
-          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
-          echo ""
-          
-          echo "🔗 All Services in namespace ${{ env.NAMESPACE }}:"  
-          kubectl get services -n ${{ env.NAMESPACE }}
-          echo ""
-          
-          echo "📦 Helm releases in namespace ${{ env.NAMESPACE }}:"
-          helm list -n ${{ env.NAMESPACE }}
-          echo ""
-          
-          echo "🌐 Access Information:"
-          MINIKUBE_IP=$(minikube ip)
-          echo "Minikube IP: $MINIKUBE_IP"
-          
-          # Show ingress if available
-          if kubectl get ingress -n ${{ env.NAMESPACE }} 2>/dev/null | grep -q .; then
-            echo "📡 Ingress:"
-            kubectl get ingress -n ${{ env.NAMESPACE }}
-          fi
-          
-          echo ""
-          echo "💡 Access methods:"
-          echo "   Port forward backend:  kubectl port-forward svc/authsys-backend-chart 3000:3000 -n ${{ env.NAMESPACE }}"
-          echo "   Port forward frontend: kubectl port-forward svc/authsys-frontend-chart 8080:80 -n ${{ env.NAMESPACE }}"
       
       - name: Health check
         run: |
