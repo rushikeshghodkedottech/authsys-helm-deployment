@@ -1,0 +1,394 @@
+name: Deploy Auth-Sys Application
+
+on:
+  # Auto-deploy when charts are updated
+  repository_dispatch:
+    types: [charts-updated, backend-updated, frontend-updated]
+  
+  # Manual deployment
+  workflow_dispatch:
+    inputs:
+      backend_tag:
+        description: 'Backend image tag'
+        required: false
+        default: 'latest'
+      frontend_tag:
+        description: 'Frontend image tag'
+        required: false  
+        default: 'latest'
+      force_database_deploy:
+        description: 'Force database redeployment'
+        required: false
+        default: false
+        type: boolean
+      force_full_deploy:
+        description: 'Force full redeployment of all services'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NAMESPACE: authsys
+  S3_URL: http://helmrepobucketbyrushikesh.s3-website-eu-west-1.amazonaws.com/
+
+jobs:
+  setup-runner:
+    runs-on: self-hosted
+    outputs:
+      runner-ready: ${{ steps.setup-complete.outputs.ready }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Update system packages
+      run: |
+        sudo apt-get update
+        sudo apt-get upgrade -y
+
+    - name: Install Docker
+      run: |
+        # Remove old Docker versions
+        sudo apt-get remove -y docker docker-engine docker.io containerd runc || true
+        
+        # Install dependencies
+        sudo apt-get install -y \
+          ca-certificates \
+          curl \
+          gnupg \
+          lsb-release
+
+        # Add Docker GPG key
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+        # Add Docker repository
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+          $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+        # Install Docker
+        sudo apt-get update
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+        # Start and enable Docker
+        sudo systemctl start docker
+        sudo systemctl enable docker
+
+        # Add current user to docker group
+        sudo usermod -aG docker $USER
+
+        # Verify installation
+        docker --version
+
+    - name: Install kubectl
+      run: |
+        # Download kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        
+        # Make executable and move to PATH
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+        # Verify installation
+        kubectl version --client
+
+    - name: Install Minikube
+      run: |
+        # Download Minikube
+        curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        
+        # Install Minikube
+        sudo install minikube-linux-amd64 /usr/local/bin/minikube
+        
+        # Verify installation
+        minikube version
+
+    - name: Install Helm
+      run: |
+        # Download Helm installer
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        
+        # Verify installation
+        helm version
+
+    - name: Install AWS CLI
+      run: |
+        # Install AWS CLI v2
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install --update
+        
+        # Verify installation
+        aws --version
+
+    - name: Start Minikube
+      run: |
+        # Start Minikube with Docker driver
+        minikube start --driver=docker --memory=4096 --cpus=2
+        
+        # Enable required addons
+        minikube addons enable ingress
+        minikube addons enable storage-provisioner
+        
+        # Verify cluster
+        kubectl cluster-info
+
+    - name: Setup completion
+      id: setup-complete
+      run: |
+        echo "ready=true" >> $GITHUB_OUTPUT
+        echo "✅ Runner setup completed successfully"
+
+  deploy:
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set deployment variables
+        id: vars
+        run: |
+          # Set image tags based on trigger type
+          if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            case "${{ github.event.action }}" in
+              "backend-updated")
+                echo "deploy_backend=true" >> $GITHUB_OUTPUT
+                echo "deploy_frontend=false" >> $GITHUB_OUTPUT
+                echo "backend_tag=${{ github.event.client_payload.image_tag || 'latest' }}" >> $GITHUB_OUTPUT
+                echo "frontend_tag=latest" >> $GITHUB_OUTPUT
+                ;;
+              "frontend-updated")
+                echo "deploy_backend=false" >> $GITHUB_OUTPUT
+                echo "deploy_frontend=true" >> $GITHUB_OUTPUT
+                echo "backend_tag=latest" >> $GITHUB_OUTPUT
+                echo "frontend_tag=${{ github.event.client_payload.image_tag || 'latest' }}" >> $GITHUB_OUTPUT
+                ;;
+              "charts-updated")
+                echo "deploy_backend=true" >> $GITHUB_OUTPUT
+                echo "deploy_frontend=true" >> $GITHUB_OUTPUT
+                echo "backend_tag=latest" >> $GITHUB_OUTPUT
+                echo "frontend_tag=latest" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          else
+            # Manual trigger
+            echo "deploy_backend=true" >> $GITHUB_OUTPUT
+            echo "deploy_frontend=true" >> $GITHUB_OUTPUT
+            echo "backend_tag=${{ github.event.inputs.backend_tag || 'latest' }}" >> $GITHUB_OUTPUT  
+            echo "frontend_tag=${{ github.event.inputs.frontend_tag || 'latest' }}" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "namespace=${{ env.NAMESPACE }}" >> $GITHUB_OUTPUT
+      
+      - name: Display deployment info
+        run: |
+          echo "🚀 Auth-Sys Deployment Information"
+          echo "=================================="
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Action: ${{ github.event.action || 'manual' }}"
+          echo "Namespace: ${{ env.NAMESPACE }}"
+          echo "Backend Tag: ${{ steps.vars.outputs.backend_tag }}"
+          echo "Frontend Tag: ${{ steps.vars.outputs.frontend_tag }}"
+          echo "Deploy Backend: ${{ steps.vars.outputs.deploy_backend }}"
+          echo "Deploy Frontend: ${{ steps.vars.outputs.deploy_frontend }}"
+          echo "Time: $(date)"
+      
+      - name: Setup and verify tools
+        run: |
+          echo "🔧 Verifying required tools..."
+          
+          # Check if tools are installed
+          kubectl version --client
+          helm version
+          minikube version
+          
+          # Check if Minikube is running
+          if ! minikube status | grep -q "host: Running"; then
+            echo "⚠️ Minikube not running. Starting Minikube..."
+            minikube start --driver=docker --memory=4096 --cpus=2
+            
+            # Enable required addons
+            minikube addons enable ingress
+            minikube addons enable storage-provisioner
+            minikube addons enable default-storageclass
+            
+            # Wait for cluster to be ready
+            echo "⏳ Waiting for cluster to be ready..."
+            kubectl wait --for=condition=ready nodes --all --timeout=300s
+          fi
+          
+          # Verify cluster connectivity
+          kubectl cluster-info
+          echo "✅ Cluster is ready!"
+      
+      - name: Add Helm repository
+        run: |
+          echo "📋 Setting up Helm repository..."
+          helm repo add authsys-repo ${{ env.S3_URL }} || echo "Repository already exists"
+          helm repo update authsys-repo
+          
+          echo "📋 Available charts:"
+          helm search repo authsys-repo
+      
+      - name: Create namespace
+        run: |
+          echo "🏗️ Creating namespace ${{ env.NAMESPACE }}..."
+          kubectl create namespace ${{ env.NAMESPACE }} || echo "Namespace already exists"
+      
+      - name: Deploy Database
+        run: |
+          echo "📊 Managing database deployment..."
+          
+          if helm list -n ${{ env.NAMESPACE }} | grep -q authsys-database; then
+            if [[ "${{ github.event.inputs.force_database_deploy }}" == "true" ]] || [[ "${{ github.event.inputs.force_full_deploy }}" == "true" ]]; then
+              echo "🔄 Force redeploying database..."
+              helm upgrade authsys-database authsys-repo/authsys-db-chart \
+                --namespace ${{ env.NAMESPACE }} \
+                --values values.yaml \
+                --wait --timeout=10m
+            else
+              echo "📊 Database already deployed, skipping..."
+            fi
+          else
+            echo "📊 Deploying database for the first time..."
+            helm install authsys-database authsys-repo/authsys-db-chart \
+              --namespace ${{ env.NAMESPACE }} \
+              --values values.yaml \
+              --wait --timeout=10m
+          fi
+          
+          echo "⏳ Waiting for database to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-db-chart -n ${{ env.NAMESPACE }} --timeout=300s || {
+            echo "⚠️ Database pods not ready, checking status..."
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-db-chart
+            kubectl describe pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-db-chart
+          }
+      
+      - name: Deploy Backend
+        if: steps.vars.outputs.deploy_backend == 'true'
+        run: |
+          echo "🔧 Deploying backend with tag: ${{ steps.vars.outputs.backend_tag }}"
+          
+          if [[ "${{ github.event.inputs.force_full_deploy }}" == "true" ]]; then
+            FORCE_FLAG="--force"
+          else
+            FORCE_FLAG=""
+          fi
+          
+          helm upgrade --install authsys-backend authsys-repo/authsys-backend-chart \
+            --namespace ${{ env.NAMESPACE }} \
+            --set image.tag=${{ steps.vars.outputs.backend_tag }} \
+            --values values.yaml \
+            --wait --timeout=5m $FORCE_FLAG
+          
+          echo "⏳ Waiting for backend to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-backend-chart -n ${{ env.NAMESPACE }} --timeout=300s || {
+            echo "⚠️ Backend pods not ready, checking status..."
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-backend-chart
+            kubectl describe pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-backend-chart
+          }
+      
+      - name: Deploy Frontend
+        if: steps.vars.outputs.deploy_frontend == 'true'
+        run: |
+          echo "🎨 Deploying frontend with tag: ${{ steps.vars.outputs.frontend_tag }}"
+          
+          if [[ "${{ github.event.inputs.force_full_deploy }}" == "true" ]]; then
+            FORCE_FLAG="--force"
+          else
+            FORCE_FLAG=""
+          fi
+          
+          helm upgrade --install authsys-frontend authsys-repo/authsys-frontend-chart \
+            --namespace ${{ env.NAMESPACE }} \
+            --set image.tag=${{ steps.vars.outputs.frontend_tag }} \
+            --values values.yaml \
+            --wait --timeout=5m $FORCE_FLAG
+          
+          echo "⏳ Waiting for frontend to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=authsys-frontend-chart -n ${{ env.NAMESPACE }} --timeout=300s || {
+            echo "⚠️ Frontend pods not ready, checking status..."
+            kubectl get pods -n ${{ env.NAMESPACE }} -l app.kubernetes.io/name=authsys-frontend-chart
+            kubectl describe pods -n ${{ env.NAMESPACE } -l app.kubernetes.io/name=authsys-frontend-chart
+          }
+      
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          echo ""
+          
+          echo "📊 All Pods in namespace ${{ env.NAMESPACE }}:"
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+          echo ""
+          
+          echo "🔗 All Services in namespace ${{ env.NAMESPACE }}:"  
+          kubectl get services -n ${{ env.NAMESPACE }}
+          echo ""
+          
+          echo "📦 Helm releases in namespace ${{ env.NAMESPACE }}:"
+          helm list -n ${{ env.NAMESPACE }}
+          echo ""
+          
+          echo "🌐 Access Information:"
+          MINIKUBE_IP=$(minikube ip)
+          echo "Minikube IP: $MINIKUBE_IP"
+          
+          # Show ingress if available
+          if kubectl get ingress -n ${{ env.NAMESPACE }} 2>/dev/null | grep -q .; then
+            echo "📡 Ingress:"
+            kubectl get ingress -n ${{ env.NAMESPACE }}
+          fi
+          
+          echo ""
+          echo "💡 Access methods:"
+          echo "   Port forward backend:  kubectl port-forward svc/authsys-backend-chart 3000:3000 -n ${{ env.NAMESPACE }}"
+          echo "   Port forward frontend: kubectl port-forward svc/authsys-frontend-chart 8080:80 -n ${{ env.NAMESPACE }}"
+      
+      - name: Health check
+        run: |
+          echo "🏥 Performing health checks..."
+          
+          # Check if all pods are ready
+          echo "⏳ Waiting for all pods to be ready (final check)..."
+          if kubectl wait --for=condition=ready pod --all -n ${{ env.NAMESPACE }} --timeout=300s; then
+            echo "✅ All pods are ready!"
+          else
+            echo "⚠️ Some pods are not ready, checking details..."
+            
+            echo "Pod status:"
+            kubectl get pods -n ${{ env.NAMESPACE }}
+            
+            echo "Problematic pods details:"
+            kubectl describe pods -n ${{ env.NAMESPACE }} --field-selector=status.phase!=Running
+            
+            echo "Recent events:"
+            kubectl get events -n ${{ env.NAMESPACE }} --sort-by='.lastTimestamp' | tail -20
+          fi
+          
+          # Final status
+          RUNNING_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} --field-selector=status.phase=Running --no-headers | wc -l)
+          TOTAL_PODS=$(kubectl get pods -n ${{ env.NAMESPACE }} --no-headers | wc -l)
+          
+          echo ""
+          echo "📊 Final Status: $RUNNING_PODS/$TOTAL_PODS pods running"
+          
+          if [ $RUNNING_PODS -eq $TOTAL_PODS ]; then
+            echo "🎉 Deployment completed successfully!"
+          else
+            echo "⚠️ Deployment completed with some issues"
+          fi
+      
+      - name: Generate deployment summary
+        if: always()
+        run: |
+          echo "📋 DEPLOYMENT SUMMARY"
+          echo "===================="
+          echo "Time: $(date)"
+          echo "Trigger: ${{ github.event_name }}"
+          echo "Backend: ${{ steps.vars.outputs.backend_tag }}"
+          echo "Frontend: ${{ steps.vars.outputs.frontend_tag }}"
+          echo "Namespace: ${{ env.NAMESPACE }}"
+          echo ""
+          echo "Final pod status:"
+          kubectl get pods -n ${{ env.NAMESPACE }} || echo "Could not get pod status"
