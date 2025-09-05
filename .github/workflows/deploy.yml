@@ -141,7 +141,7 @@ jobs:
 
   deploy:
     runs-on: self-hosted
-    
+    depends_on: setup-runner
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
