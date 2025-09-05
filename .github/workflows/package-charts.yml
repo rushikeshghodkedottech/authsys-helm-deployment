@@ -47,17 +47,17 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           echo "Updating all Chart.yaml files with version: $VERSION"
           
-          find helm-charts -name "Chart.yaml" -exec sed -i "s/version: .*/version: $VERSION/" {} \;
-          find helm-charts -name "Chart.yaml" -exec sed -i "s/appVersion: .*/appVersion: \"$VERSION\"/" {} \;
+          find helm-repo -name "Chart.yaml" -exec sed -i "s/version: .*/version: $VERSION/" {} \;
+          find helm-repo -name "Chart.yaml" -exec sed -i "s/appVersion: .*/appVersion: \"$VERSION\"/" {} \;
           
           echo "Updated chart versions:"
-          find helm-charts -name "Chart.yaml" -exec grep -H "version\|appVersion" {} \;
+          find helm-repo -name "Chart.yaml" -exec grep -H "version\|appVersion" {} \;
       
       - name: Package Helm charts
         run: |
           mkdir -p packaged-charts
           
-          for chart_dir in helm-charts/*/; do
+          for chart_dir in helm-repo/*/; do
             if [ -d "$chart_dir" ]; then
               chart_name=$(basename "$chart_dir")
               echo "📦 Packaging $chart_name..."
