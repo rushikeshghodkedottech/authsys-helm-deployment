@@ -124,7 +124,7 @@ jobs:
     - name: Start Minikube
       run: |
         # Start Minikube with Docker driver
-        minikube start --driver=docker --memory=4096 --cpus=2
+        minikube start --driver=docker --memory=2200 --cpus=2
         
         # Enable required addons
         minikube addons enable ingress
