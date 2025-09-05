@@ -1,0 +1,79 @@
+# Auth-Sys Application Configuration
+global:
+  namespace: authsys
+
+# Backend Configuration
+backend:
+  replicaCount: 2
+  image:
+    repository: rushikeshghodkedottech/authsys-helm-deployment-backend
+    pullPolicy: IfNotPresent
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  
+  service:
+    type: ClusterIP
+    port: 3000
+  
+  env:
+    NODE_ENV: "production"
+    PORT: "3000"
+    CORS_ORIGIN: "http://localhost"
+    DB_HOST: "authsys-db-chart"
+    DB_USER: "root"
+    DB_NAME: "auth_sys"
+    DB_PORT: "3306"
+    JWT_EXPIRES_IN: "7d"
+
+# Frontend Configuration
+frontend:
+  replicaCount: 2
+  image:
+    repository: rushikeshghodkedottech/authsys-helm-deployment-frontend
+    pullPolicy: IfNotPresent
+  
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "400m"
+  
+  service:
+    type: ClusterIP
+    port: 80
+  
+  env:
+    VITE_API_URL: "http://localhost:3000/api"
+
+# Database Configuration
+database:
+  replicaCount: 1
+  image:
+    repository: mysql
+    tag: latest
+    pullPolicy: IfNotPresent
+  
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  
+  persistence:
+    enabled: true
+    size: "10Gi"
+    storageClass: "standard"
+  
+  env:
+    mysqlrootpass: "rootpass"
+    mysqldb: "auth_sys"
