@@ -119,7 +119,7 @@ jobs:
       - name: Trigger deployment
         uses: peter-evans/repository-dispatch@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.PAT }}
           event-type: charts-updated
           client-payload: |
             {
