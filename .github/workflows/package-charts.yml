@@ -116,13 +116,3 @@ jobs:
           echo "📋 Available charts:"
           helm search repo authsys-repo
       
-      - name: Trigger deployment
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.PAT }}
-          event-type: charts-updated
-          client-payload: |
-            {
-              "chart_version": "${{ steps.version.outputs.version }}",
-              "trigger": "charts-updated"
-            }
