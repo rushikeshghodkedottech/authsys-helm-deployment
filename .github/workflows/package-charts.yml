@@ -1,0 +1,128 @@
+name: Package and Upload Helm Charts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm-repo/**'
+  workflow_dispatch:
+    inputs:
+      chart_version:
+        description: 'Chart version (leave empty for auto-generation)'
+        required: false
+        default: ''
+
+env:
+  S3_BUCKET: helmrepobucketbyrushikesh
+  S3_URL: http://helmrepobucketbyrushikesh.s3-website-eu-west-1.amazonaws.com/
+
+jobs:
+  package-and-upload:
+    runs-on: ubuntu-latest
+    outputs:
+      chart-version: ${{ steps.version.outputs.version }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+      
+      - name: Generate chart version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.chart_version }}" ]; then
+            VERSION="${{ github.event.inputs.chart_version }}"
+          else
+            VERSION=$(date +"%Y.%m.%d")-build.${{ github.run_number }}
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Generated version: ${VERSION}"
+      
+      - name: Update chart versions
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Updating all Chart.yaml files with version: $VERSION"
+          
+          find helm-charts -name "Chart.yaml" -exec sed -i "s/version: .*/version: $VERSION/" {} \;
+          find helm-charts -name "Chart.yaml" -exec sed -i "s/appVersion: .*/appVersion: \"$VERSION\"/" {} \;
+          
+          echo "Updated chart versions:"
+          find helm-charts -name "Chart.yaml" -exec grep -H "version\|appVersion" {} \;
+      
+      - name: Package Helm charts
+        run: |
+          mkdir -p packaged-charts
+          
+          for chart_dir in helm-charts/*/; do
+            if [ -d "$chart_dir" ]; then
+              chart_name=$(basename "$chart_dir")
+              echo "📦 Packaging $chart_name..."
+              
+              # Update dependencies if Chart.yaml has dependencies
+              if grep -q "dependencies:" "$chart_dir/Chart.yaml"; then
+                helm dependency update "$chart_dir" || echo "No dependencies to update"
+              fi
+              
+              # Package the chart
+              helm package "$chart_dir" -d packaged-charts/
+            fi
+          done
+          
+          echo "📋 Packaged charts:"
+          ls -la packaged-charts/
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+      
+      - name: Upload charts to S3
+        run: |
+          echo "🚀 Uploading packaged charts to S3..."
+          aws s3 cp packaged-charts/ s3://${{ env.S3_BUCKET }}/ --recursive --include "*.tgz"
+          
+          echo "📋 Current charts in S3:"
+          aws s3 ls s3://${{ env.S3_BUCKET }}/ | grep .tgz
+      
+      - name: Update Helm repository index
+        run: |
+          echo "📋 Updating Helm repository index..."
+          
+          # Download existing index (if it exists)
+          aws s3 cp s3://${{ env.S3_BUCKET }}/index.yaml ./current-index.yaml || echo "No existing index found"
+          
+          # Generate new index
+          helm repo index packaged-charts --url ${{ env.S3_URL }} --merge current-index.yaml
+          
+          # Upload updated index
+          aws s3 cp packaged-charts/index.yaml s3://${{ env.S3_BUCKET }}/index.yaml
+          
+          echo "✅ Helm repository index updated successfully!"
+      
+      - name: Verify charts availability
+        run: |
+          echo "🔍 Verifying charts are accessible..."
+          
+          # Add the repo and check if charts are available
+          helm repo add authsys-repo ${{ env.S3_URL }} || helm repo update authsys-repo
+          helm repo update
+          
+          echo "📋 Available charts:"
+          helm search repo authsys-repo
+      
+      - name: Trigger deployment
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: charts-updated
+          client-payload: |
+            {
+              "chart_version": "${{ steps.version.outputs.version }}",
+              "trigger": "charts-updated"
+            }
